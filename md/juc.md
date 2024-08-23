@@ -60,7 +60,7 @@ Java Virtual Machine Stacks (Java虚拟机栈)
 
 #### 打断休眠
 
-打断`sleep`、`wait`、`join`的线程。使线程interrupt布尔值为true，表示被打断，抛出InterruptedException异常，同时清除中止状态（interrupt被设置为false）， 打断休眠，异常处理中可以对当前线程任务进行处理，或者重新设置终止状态，这取决于程序员。
+打断`sleep`、`wait`、`join`的线程。**使线程interrupt布尔值为true**，表示被打断，抛出`InterruptedException`异常，同时**清除中止状态（interrupt被设置为false**）， 打断休眠，异常处理中可以对当前线程任务进行处理，或者重新设置终止状态，这取决于程序员。
 
 #### 打断任务
 
@@ -68,7 +68,7 @@ Java Virtual Machine Stacks (Java虚拟机栈)
 
 #### 打断park
 
-`park()`是`LockSupport`类中的一个静态方法，用来阻塞线程。`LockSupport`并发锁，主要包含两种操作，分别为阻塞操作和唤醒操作。我们更加熟悉的阻塞唤醒操作是`wait/notify`方式，它主要以Object的角度来设计。而`LockSupport`提供的`park/unpark`则是以线程的角度来设计，真正解耦了线程之间的同步。`interrupt()`可以打断用`LockSupport`阻塞的线程，让线程从`park`阻塞中释放，并且线程标记为打断状态。
+`park()`是`LockSupport`类中的一个静态方法，用来阻塞线程。`LockSupport`并发锁，主要包含两种操作，分别为阻塞操作和唤醒操作。我们更加熟悉的阻塞唤醒操作是`wait/notify`方式，它主要以Object的角度来设计。而`LockSupport`提供的`park/unpark`则是以线程的角度来设计，真正解耦了线程之间的同步。`interrupt()`可以打断用`LockSupport`阻塞的线程，让线程从`park`阻塞中释放，并且**线程标记为打断状态，但不会触发异常**。
 
 ## 线程状态
 
@@ -282,6 +282,129 @@ Monitor被翻译为“监视器”或者“管程”，Monitor是Java中一个�
 
 `sleep`是Thread类方法，不强制搭配`synchronized`使用，**不会释放锁**。
 
+### 同步设计模式——保护性暂停（Guarded Suspension)
+
+在多线程通信中，在一个线程需要等待另一个线程的执行结果，如何避免虚假唤醒和保证有限等待的正确性，保护性暂停可以有效解决这些问题。需要一个对象来管理结果。
+
+<img src="image-20240821222955892.png" alt="image-20240821222955892" style="zoom:50%;" />
+
+观察以下管理执行结果的类，循环语句条件`result == null `和 `(delay = start + timeout - System.currentTimeMillis()) > 0`分别就虚假唤醒和有限等待问题做出了解决。
+
+```java
+class GuardedObject {
+    Integer result;
+
+    /**
+     * 同步获取数据方法，使用保护性暂停设计模式
+     *
+     * @param timeout 超时时间
+     * @return
+     */
+    public synchronized Integer getResult(long timeout) throws InterruptedException {
+        if (timeout > 0) {
+            long start = System.currentTimeMillis(); //开始等待时间
+            long delay = timeout; //剩余等待时间
+            do {
+                wait(delay);
+            } while (result == null && (delay = start + timeout - System.currentTimeMillis()) > 0);
+        } else if (timeout == 0) {
+            while (result == null) {
+                this.wait();
+            }
+        }
+        return this.result;
+    }
+
+    public synchronized void setResult(int x) {
+        this.result = x;
+        this.notifyAll();
+    }
+}
+```
+
+如果看懂这个代码，恭喜你！同时理解了`Thread.join()`方法原理。与上方代码不同的是，join判断的是线程是否存活。
+
+#### 解耦等待和生产
+
+如果需要在多个类之间使用`GuardedObject`对象，作为参数传递不是很方便，因此设计一个用来解耦的中间类，这样不仅能够解耦【结果等待者】和【结果生产者】，还能够同时支持多个任务的管理。[代码区](#保护性暂停之解耦等待和生产)。
+
+结合代码和图示，可以看出，在保护性暂停基础上，加了一个解耦类，用来统一和维护**一对一**的结果对象。
+
+<img src="image-20240821223113181.png" alt="image-20240821223113181" style="zoom:50%;" />
+
+### 异步设计模式——生产者消费者模式
+
+生产者消费者模式中解耦了生产者和消费者（线程），不需要一一对应。消息是放着一个消息队列中的，队列满足接收消息的请求时，生产者可以直接发送消息，不需要等待和关注消费者的处理；队列满时生产者等待；队列空时消费者等待。平衡生产者和消费者变得简单，如果消费者的速度比生产者生产的速度慢，那么可以添加消费者，反之同理。
+
+<img src="image-20240822154309235.png" alt="image-20240822154309235" style="zoom:67%;" />
+
+以下代码是一个简单消息队列的实现。
+
+```java
+@Slf4j(topic = "c.queue")
+class MessageQueue {
+    private final LinkedList<Message> queue = new LinkedList<>();
+    private final int capacity; //队列大小
+
+    public MessageQueue(int capacity) {
+        this.capacity = capacity;
+    }
+
+    //存
+    public void put(Message message) throws InterruptedException {
+        synchronized (queue) {
+            while (queue.size() == capacity) {
+                log.debug("队列满了，等一下");
+                queue.wait(); //满队列 等待
+            }
+            queue.addLast(message);
+            queue.notifyAll(); //在空队列的情况下唤醒一下等待的消费者。
+        }
+    }
+    //取
+    public Message take() throws InterruptedException {
+        synchronized (queue) {
+            while (queue.isEmpty()) {
+                log.debug("队列空了，等一下");
+                queue.wait(); //等待消息
+            }
+            Message meg = queue.removeFirst();
+            queue.notifyAll(); //在满队列的情况下唤醒等待存放的生产者。
+            return meg;
+        }
+    }
+}
+```
+
+## LockSupport
+
+LockSupport用来创建锁和其他同步类的基本线程阻塞原语。简而言之，当调用`LockSupport.park`时，**表示当前线程将会等待**，直至获得许可，当调用`LockSupport.unpark`时，必须把等待获得许可的线程作为参数进行传递，好让此线程继续运行。
+
+LockSupport和每个使用它的线程都有一个许可关联（对象），管理线程的许可状态，许可且最多只有一个。`park`消耗许可，`unpark`增加许可，但累加无效。
+
+以下图片是许可的底层实现原理。
+
+- Parker-0。可以理解为是一个管理线程许可状态的内部数据结构。
+- \_counter。许可状态。1表示拥有许可，0表示没有许可。
+- \_mutex。互斥锁。确保_counter的更新操作是原子的。
+- \_cond。条件变量。判断许可状态。
+
+当线程使用`park`方法时，在条件变量中判断当前线程许可状态，如果无许可，则在条件变量中等待，直到许可重新出现，将许可置为0，并退出等待状态；如果一开始判断就有许可，则不需要等待，直接将许可置为0，并退出等待状态。
+
+<img src="image-20240823170237116.png" alt="image-20240823170237116" style="zoom:50%;" />
+
+除了无参`park()`方法，还有一些带`Object blocker`和`long deadline`参数的。带时间的就是设置等待的时间，超时停止等待。`blocker`参数在线程等待前被`setBlocker(t,blocker)`用来设置`Thread`对象上的`parkBlocker`的对象，结束等待后会再次调用`setBlocker(t, null)`把对象置为空，在阻塞过程中可以通过`getBlocker(t)`方法获得某个线程的`parkBlocker`，可以通过自定义的对象用来知道线程的等待的位置或者原因。主要是用来做等待原因校验的。
+
+### `park`和`sleep`方法的异同
+
+- 都是**阻塞当前线程的执行，且都不会释放当前线程占有的锁资源；**
+- `Thread.sleep`方法声明上抛出了`InterruptedException`中断异常，所以调用者需要捕获这个异常或者再抛出；
+- `LockSupport.park`方法**不需要捕获中断异常**；
+- `Thread.sleep`本身就是一个native方法；
+- `LockSupport.park`底层是调用的Unsafe的native方法；
+
+
+
 
 
 
@@ -304,7 +427,7 @@ Monitor被翻译为“监视器”或者“管程”，Monitor是Java中一个�
 
 ## 3. wait/notify如何针对某个线程进行唤醒
 
-`notify()`和`notifyAll()`都不能对针对某一个线程进行唤醒，但是可以在代码角度进行设计，避免虚假唤醒。比如为线程定义一个变量，在线程中使用`while`循环来判断变量的值，假设当使用`notify`时，唤醒的线程没有达到条件，则再次进入`wait`循环中等待一下次唤醒。
+`notify()`和`notifyAll()`都不能对针对某一个线程进行唤醒，但是可以在代码角度进行设计，避免**虚假唤醒**。比如线程唤醒的条件变量，在线程中使用`while`循环来判断变量的值，假设当使用`notify`时，唤醒的线程没有达到条件，则再次进入`wait`循环中等待一下次唤醒。
 
 # 代码块
 
@@ -357,3 +480,110 @@ public static void main(String[] args) {
 ```
 
 在这个实例中，我们想要的结果只保存一个a，当a已经存在时就不要在table上插入新的a。事实是，虽然单个方法是线程安全的，但是这样组合使用，并不是线程安全的。假设a不存在，线程1抢到锁，判断不存在a，释放锁，当进入put方法前，还需要拿到锁，这个时候就可以被线程2拿到锁，判断不存在a，释放锁，此时，两个线程都在抢夺下一个锁，在两个单位时间后都执行了put a，导致第一个次的value a被修改。[return](#常见线程安全类)
+
+## 保护性暂停之解耦等待和生产
+
+```java
+public class GuardedSuspensionDecoupling {
+    public static void main(String[] args) throws InterruptedException {
+        for (int i = 0; i < 5; i++) {
+            new Consumer().start();
+        }
+        Thread.sleep(1000);
+        //针对消费者进行推送
+        for (Integer id : DecouplingpObject.getIds()) {
+            new Producer(id, id+"").start();
+        }
+    }
+}
+//消费者
+@Slf4j(topic = "c.consumer")
+class Consumer extends Thread {
+    @Override
+    public void run() {
+        int guardedObjectId = DecouplingpObject.createGuardedObject();
+        log.debug("等待结果对象{}", guardedObjectId);
+        GuardedObject guardedObject = DecouplingpObject.getGuardedObject(guardedObjectId);
+        try {
+            Object result = guardedObject.getResult(5000);
+            log.debug("获得结果对象{}结果：{}", guardedObject, result);
+        } catch (InterruptedException e) {
+            throw new RuntimeException(e);
+        }
+
+    }
+}
+//生产者
+@Slf4j(topic = "c.producer")
+class Producer extends Thread {
+    private int toId; //消费的对象
+    private String meg; //生产内容
+
+    public Producer(int toId, String meg) {
+        this.toId = toId;
+        this.meg = meg;
+    }
+
+    @Override
+    public void run() {
+        log.debug("服务消费对象：{}", toId);
+        GuardedObject guardedObject = DecouplingpObject.getGuardedObject(toId);
+        guardedObject.setResult(meg);
+    }
+}
+//解耦对象，使生产者和消费者解耦，统一管理生产者和消费者的一对一关系。
+class DecouplingpObject {
+    //线程安全的map，保存结果对象的集合
+    private static final Hashtable<Integer, GuardedObject> guardedObjectTable = new Hashtable<>();
+    private static int count = 1;
+
+    private static synchronized int generateId() {
+        return count++;
+    }
+    public static GuardedObject getGuardedObject(int id) {
+        return guardedObjectTable.get(id);
+    }
+    //生成一个结果对象，并加入表中维护
+    public static int createGuardedObject() {
+        int id = generateId();
+        guardedObjectTable.put(id, new GuardedObject(id));
+        return id;
+    }
+
+    public static Set<Integer> getIds() {
+        return guardedObjectTable.keySet();
+    }
+}
+//结果对象，用来等待和获取结果的，生产者和消费者一对一。
+class GuardedObject {
+    private final Integer id;
+    private Object result;
+
+    public GuardedObject(Integer id) {
+        this.id = id;
+    }
+    public synchronized Object getResult(long timeout) throws InterruptedException {
+        if (timeout > 0) {
+            long start = System.currentTimeMillis();
+            long delay = timeout;
+            do {
+                wait(delay);
+            } while (result == null && (delay = start + timeout - System.currentTimeMillis()) > 0);
+        } else if (timeout == 0) {
+            while (result == null) {
+                this.wait();
+            }
+        }
+        return this.result;
+    }
+    public synchronized void setResult(Object x) {
+        this.result = x;
+        this.notifyAll();
+    }
+    public Integer getId() {
+        return id;
+    }
+}
+```
+
+[return](#解耦等待和生产)

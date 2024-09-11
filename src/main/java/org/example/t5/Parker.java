@@ -24,7 +24,6 @@ public class Parker {
             System.out.println("unpark");
         });
         thread.start();
-
         sleep(1000);
         synchronized (lock) {
             System.out.println("park之前的blocker");

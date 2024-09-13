@@ -854,7 +854,7 @@ final void lock() {
 
 > `@ReservedStackAccess` 是 JDK 内部的一个注解，它主要用于标记在某些特殊情况下可以直接访问栈内存的 Java 方法。该注解主要用于 JDK 内部，普通开发者一般不会在应用程序中使用它。它的主要目的是提高性能或处理一些特定的系统操作，尤其是与本地代码或 JVM 紧密交互的地方。
 
-调用父类方法`acquire(int)`之前进行了一个判断，再来看一下`initialTryLock()`，这是个内部类Sync的抽象方法，这里展示的是NonfairSync的实现
+调用父类方法`acquire(int)`之前进行了一个判断，再来看一下`initialTryLock()`，这是个内部类Sync的抽象方法，这里展示的是`NonfairSync`的实现
 
 ```java
 final boolean initialTryLock() {
@@ -891,17 +891,56 @@ protected final boolean tryRelease(int releases) { // 参数是"1"
 }
 ```
 
-跟踪`releases`参数的值为1，所以当unpark时，当前合法线程获取到的资源数减1，直到为0时`tryRelease(int)`返回`true`，线程才正式让出owner地位。
+跟踪`releases`参数的值为1，所以当unpark时，当前合法线程获取到的资源数减1，直到为0时`tryRelease(int)`返回`true`，线程才正式让出owner位置。
 
 ### 公平锁
 
+公平锁细节在`FairSync`实现的两个方法中，直接来看
 
+```java
+final boolean initialTryLock() {
+    Thread current = Thread.currentThread();
+    int c = getState();
+    if (c == 0) {
+        if (!hasQueuedThreads() && compareAndSetState(0, 1)) {
+            setExclusiveOwnerThread(current);
+            return true;
+        }
+    } else if (getExclusiveOwnerThread() == current) {
+        if (++c < 0) // overflow
+            throw new Error("Maximum lock count exceeded");
+        setState(c);
+        return true;
+    }
+    return false;
+}
+```
 
+```java
+protected final boolean tryAcquire(int acquires) {
+    if (getState() == 0 && !hasQueuedPredecessors() &&
+        compareAndSetState(0, acquires)) {
+        setExclusiveOwnerThread(Thread.currentThread());
+        return true;
+    }
+    return false;
+}
+```
 
+这里跟`NonfairSync`中的实现基本一样，仔细看可以知道就是在尝试抢资源前多个`!hasQueuedPredecessors()`（已排队处理前置任务）
 
+```java
+public final boolean hasQueuedPredecessors() {
+    Thread first = null; Node h, s;
+    if ((h = head) != null && ((s = h.next) == null ||
+                               (first = s.waiter) == null ||
+                               s.prev == null))
+        first = getFirstQueuedThread(); // retry via getFirstQueuedThread
+    return first != null && first != Thread.currentThread();
+}
+```
 
-
-
+判断队列中有没有其它线程排队。如果有就不抢资源，如果没有或者排第一的就是当前线程，则公平的获取资源。
 
 
 

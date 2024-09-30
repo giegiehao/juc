@@ -26,6 +26,8 @@
 
 [深入理解JVM之Java内存模型 - 个人文章 - SegmentFault 思否](https://segmentfault.com/a/1190000021637869)
 
+[Java多线程进阶（十七）—— J.U.C之atomic框架：LongAdder - 透彻理解Java并发编程 - SegmentFault 思否](https://segmentfault.com/a/1190000015865714)
+
 ## 进程线程
 
 ## 并发并行
@@ -98,7 +100,7 @@ Java Virtual Machine Stacks (Java虚拟机栈)
 - TIME_WAITING：有限等待。**阻塞状态**
 - TERMINATED：终态，线程运行结束。**终态**
 
-## synchronized关键字详解
+## synchronized关键字
 
 `synchronized`是解决临界区的静态条件发生的阻塞式手段之一。阻塞式还包括Lock，非阻塞式手段有原子变量。
 
@@ -177,7 +179,7 @@ Monitor被翻译为“监视器”或者“管程”，Monitor是Java中一个�
 
 讲monitor之前，首先简单了解一下对象头。以下对象头中锁状态，都是为`synchronized`关键字设计的（gc状态不是），为了优化和管理线程同步操作。
 
-这里以32为系统为例。（64位对象头Mark Word区域64位，响应的属性区域大小也会更大）
+这里以32位系统为例。（64位系统对象头Mark Word区域64位，响应的属性区域大小也会更大）
 
 普通对象
 
@@ -1101,7 +1103,7 @@ JMM的设计包含两部分，一部分是**面向我们程序员**提供的，�
 
 #### JMM八大原子操作
 
-JMM定义的8种数据在工作内存和主内存同步的**原子操作（概念，不是真正的指令或操作，是抽象出来的，编译和运行时有实现）**
+JMM定义的8种数据在工作内存和主内存同步的**原子操作（概念，编译和运行时有实现）**
 
 1. **lock(锁定)**:作用于主内存的变量,把一个变量标记为一条线程独占状态
 2. **unlock(解锁)**:作用于主内存的变量,把一个处于锁定状态的变量释放出来,释放后 的变量才可以被其他线程锁定
@@ -1124,49 +1126,290 @@ JMM对volatile变量定义了特殊的操作规则，如下图所示。
 
 根据图示，可以把上面提到的`volatile`**可见性规则**用JMM八大原子操作来表示：线程对`volatile`变量的`read、load和use`操作必须连续出现，即变量需要使用时，必须先从主内存中读取最新值；`assign、lock、store、write、unlock`操作也必须连续出现，即线程对变量赋值后，确保线程对共享变量的独占使用，`lock`会使其它线程中对应的缓存失效，并且马上往主内存中写入新值。
 
-对于非volatile变量是不用遵循以上顺序的，不仅不需要读和写的原子性操作顺序出现，甚至还可以重排。
+对于非volatile变量是不用遵循以上顺序的，不仅不需要读和写的原子性操作顺序出现，甚至还可以重排，随缘刷新缓存。
 
 volatile变量不能保证原子性就是因为读和写分别是原子的，但是合在一起不是原子的，通过[非原子性检测](#volatile非原子性证明)可以证明。原子性还是老老实实用`synchronized`。
 
-有序性原理就是内存屏障，遵从JMM规则，由编译器和JVM实现。
+有序性原理就是通过插入内存屏障，遵循JMM规则，由编译器和JVM实现。
 
 ### 适用场景
 
+volatile常用场景有
 
+1. 单一赋值变量。即只赋值一次的变量、可以立刻刷新到主存中，也可以用final表示常量。
+2. 状态标志。比如boolean类型的flag。
+3. 写操作不依赖于当前值或其它共享变量。适当替代synchronized。
+4. 读操作远多于写操作。
+5. 单例模式的双重验证锁DCL。
 
+## CAS——乐观锁
 
+> **悲观锁**：以最坏的情况看待问题，认为当前情况一定会被其它线程干预，必须要锁住线程、独占线程才能避免干预，**阻塞同步**。代表：synchronized、ReentrantLock等独占锁。性能瓶颈在cpu会大量切换上下文。
+>
+> **乐观锁**：以最好的情况看待问题，认为当前情况不会被干预，可以一直运行，无需加锁无需等待，**非阻塞同步**。代表：CAS、CAS实现的atomic包。性能瓶颈在cpu可能会出现长时间空转。
 
+### CAS介绍
 
+CAS全称CompareAndSwap（比较与交换），它是一条**CPU原语**，拥有天然的原子性。对于一个变量，比较当前值和旧值，如果相等，则把当前值更新为新值。CAS是硬件级指令，通过硬件支持实现。
 
+### Java中CAS实现
 
+Java对CAS原语进行了封装，实现了跨设备并兼顾易用性。现在以juc包下的`AtomicInteger`作为例子解剖Java中的原子类。
 
+首先看一下这个原子加一的方法，直接调用的`Unsafe`类中的`getAndAddInt`方法。
 
+```java
+public final int getAndIncrement() {
+    return U.getAndAddInt(this, VALUE, 1);
+}
+```
 
+这个方法使用**自旋的方式**，获得当前原子对象的值，并且通过调用`weakCompareAndSetInt`尝试设置新的值，直到设置成功。
 
+```java
+@IntrinsicCandidate
+public final int getAndAddInt(Object o, long offset, int delta) {
+    int v;
+    do {
+        v = getIntVolatile(o, offset);
+    } while (!weakCompareAndSetInt(o, offset, v, v + delta));
+    return v;
+}
+```
 
+>@IntrinsicCandidate：表示该方法可能会被JVM优化或替换为更高效的内置方法。
 
+继续追溯源码，直接调用的`compareAndSetInt`。
 
+```java
+@IntrinsicCandidate
+public final boolean weakCompareAndSetInt(Object o, long offset,
+                                          int expected,
+                                          int x) {
+    return compareAndSetInt(o, offset, expected, x);
+}
+```
 
+最终追溯到native本地方法方法。Unsafe.java中的native方法使用了C++写的unsafe.cpp，再到CPU的CAS原子指令。
 
+```java
+@IntrinsicCandidate
+public final native boolean compareAndSetInt(Object o, long offset,
+                                             int expected,
+                                             int x);
+```
 
+### Unsafe类中的CAS
 
+Unsafe是sun.misc包下的一个类，主要提供一些用于执行低级别、不安全操作的方法，如下图所示。
 
+<img src="view.png" alt="preview" style="zoom:50%;" />
 
+Unsafe中只提供了三个原子的CAS方法：**compareAndSwapObject、compareAndSwapInt和compareAndSwapLong。都是native方法。**它们调用的实现于unsafe.cpp的本地方法。
 
+```cpp
+UNSAFE_ENTRY_SCOPED(jint, Unsafe_CompareAndExchangeInt(JNIEnv *env, jobject unsafe, jobject obj, jlong offset, jint e, jint x)) {
+  oop p = JNIHandles::resolve(obj); // java对象地址
+  volatile jint* addr = (volatile jint*)index_oop_from_field_offset_long(p, offset); // 属性地址
+  return Atomic::cmpxchg(addr, e, x); // 交换属性地址中的值
+} UNSAFE_END
+```
 
+可以看到，cpp中使用`Atomic::cmpxchg`来实现比较和替换，更新属性地址中的值。
 
+`Atomic::cmpxchg`是一个系统级指令，不同的系统内核有不同的实现指令。如果是多核处理器，为`cmpxchg`指令添加`lock`前缀，确保指令的原子性。
 
+> **lock前缀**：lock前缀可以在某些指令前加上，当lock信号被声明后，锁定总线，独占共享内存，保证指令的原子性。LOCK#信号就是**总线锁**，但是总线锁的开销太大，现在的新cpu都是采用以**缓存锁**的形式实现LOCK#信号，对cpu缓存中的缓存行锁定，在锁定期间其它核不能同时缓存此数据，释放后使其它线程响应的cache line（缓存行）失效。
 
+与 `compareAndSwapInt` 和 `compareAndSwapLong` 直接操作地址中的数值不同，`compareAndSwapObject` 操作的是地址中的对象引用。比较判断当前引用地址和预期引用地址是否是同一个对象引用地址，如果不是，就把当前地址中的值修改为性的引用。`compareAndSwapObject`不会修改对象本身，而是修改该地址中保存的对象引用。
 
+### CAS的缺点
 
+- CPU空转问题
+- ABA问题——只关心值，不关心是否被修改过
 
+## 原子类
 
+原子类是线程安全的，保证了原子性、可见性和有序性，在原子类中维护的值使用`volatile`修饰保证可见性，或者使用`final`修饰，底层实现`Unsafe`和`VarHandle`保证原子性。
 
+> JDK9后，官方推荐使用`java.lang.invoke.Varhandle`来代替Unsafe大部分功能，更安全，更高性能。Varhandle随着时间的推移逐渐代替Unsafe，JDK17中原子类大部分都已经使用Varhandle。这个先按下不表，可能会在以后来讲解一下它。
 
+通过查找juc.atomic包下的原子类型，一共可以找到12个。
 
-## final关键字详解
+<img src="image-20240922004301266.png" alt="image-20240922004301266" style="zoom: 67%;" />
 
-==关键词：禁止重排、完全初始化、不可变引用==
+### 原子更新基本类型
+
+- **AtomicInteger**：原子整数。
+- **AtomicLong**：原子长整数。
+- **AtomicBoolean**：原子布尔值。
+
+这三个原子类的使用基本一致，值得注意的是CAS提供的原子操作直接支持`int`和`long`类型的变量，所以`AtomicInteger`和`AtomicLong`是直接按照上面示例中的方法调用流程，而`AtomicBoolean`是通过维护一个`int`值来区分`boolean`状态。
+
+### 原子更新数组
+
+- **AtomicIntegerArray**：原子整型数组。
+- **AtomicLongArray**：原子长整型数组。
+- **AtomicReferenceArray**：原子引用类型数组。
+
+无论哪个原子数组类型，都是在内部维护一个`final`数组，通过数组下标（内存偏移量）去定位某个值的内存地址，对其进行CAS原子操作。
+
+### 原子更新引用类型
+
+- **AtomicReference**：原子更新引用类型。
+- **AtomicStampedReference**：原子更新引用类型, 内部使用Pair来存储元素值及其版本号。
+- **AtomicMarkableReferce**：原子更新带有标记位的引用类型。
+
+`AtomicStampedReference`使用一个版本号来记录修改情况，可以知道这个对象是否被修改和被修改了多少次，**解决了CAS的ABA问题**。
+
+它维护的是一个`Pair`内部类对象，当中存放的是需要原子操作的对象和版本号。
+
+```java
+private static class Pair<T> {
+    final T reference;
+    final int stamp;
+    private Pair(T reference, int stamp) {
+        this.reference = reference;
+        this.stamp = stamp;
+    }
+    static <T> Pair<T> of(T reference, int stamp) {
+        return new Pair<T>(reference, stamp);
+    }
+}
+```
+
+每次设置新值，通过实例新的`Pair`对象，使用CAS修改`AtomicStampedReference`维护的`Pair`对象，同时更新了新值和版本号。
+
+`AtomicMarkableReferce`于上者差不多，使用boolean标志位来代替版本号，旨在表示值是否被更新过。
+
+`AtomicMarkableReferce`和`AtomicStampedReference`的方法声明中没有一个是需要自旋的，因为版本号和标志位的意义是明确的，如果目标旧版本号或者旧标志位与当前不同，那么表示这个更新应该过期。
+
+```java
+public boolean compareAndSet(V   expectedReference,
+                             V   newReference,
+                             int expectedStamp,
+                             int newStamp) {
+    Pair<V> current = pair;
+    return
+        expectedReference == current.reference &&
+        expectedStamp == current.stamp &&
+        ((newReference == current.reference &&
+          newStamp == current.stamp) ||
+         casPair(current, Pair.of(newReference, newStamp))); // casPair就是原子更新Pair对象
+}
+```
+
+### 原子更新字段类
+
+- **AtomicIntegerFieldUpdater**: 原子更新整型的字段的更新器。
+- **AtomicLongFieldUpdater**: 原子更新长整型字段的更新器。
+- **AtomicReferenceFieldUpdater**: 原子更新引用对象字段。
+
+以线程安全的方式操作非线程安全对象内的某些字段，更新的对象属性必须使用`volatile`修饰符。它们使用反射机制来获得类中指定属性，获得属性在类中的偏移量，然后通过对象内存加偏移量的地址进行CAS。
+
+既然使用反射机制，就要确保反射能正确获得类属性，有几条需要注意的：
+
+- 字段必须是`volatile`类型的，用来确保可见性的。
+- 字段只能是当前类的非`privite`字段，不能是父类字段。子类字节码不直接包含父类的字段，并且源码中没有使用到`getSuperclass`来加载父类字节码。
+- 只能是实例变量，不能是类变量。虽然类变量存在该类字节码中，但它不属于对象级的字段，在`native`方法`objectFieldOffset0`中报错
+- 只能是可修改变量，不能是`final`变量，因为final的语义就是不可修改。实际上final的语义和volatile是有冲突的，这两个关键字不能同时存在。
+
+### LongAdder
+
+#### LongAdder简介
+
+`LongAdder`是整数加法器，提供**简单的线程安全的加减法计算**，与`AtomicLong`功能类似，理论上都是维护一个`Long`整数，但是实现原理上不同，`LongAdder`在高并发场景下能有**更高的效率**。官方推荐在并发特别高的情况下使用`LongAdder`或者其兄弟类。
+
+#### 原理
+
+`LongAdder`的原理可以用**“热点分散”**来总结，在多线程高并发下从对单一的数值进行原子操作到**对多个数值分散进行原子操作**。
+
+<img src="image-20240924155337043.png" alt="image-20240924155337043" style="zoom:50%;" />
+
+从源码层面分析，`LongAdder`中都是对父类`Striped64`的封装，重点看一下它是如何实现上方图片的**“热点分散”**。
+
+```java
+# LongAdder.java
+public void add(long x) {
+    // cs: 维护的cell数组；b：base值；m：cs长度；c：分配线程到某个的cell中
+    Cell[] cs; long b, v; int m; Cell c;
+    if ((cs = cells) != null || !casBase(b = base, b + x)) {
+        int index = getProbe();
+        boolean uncontended = true;
+        if (cs == null || (m = cs.length - 1) < 0 ||
+            (c = cs[index & m]) == null ||
+            !(uncontended = c.cas(v = c.value, v + x)))
+            longAccumulate(x, null, uncontended, index);
+    }
+}
+```
+
+初始Cell数组为空时，数组会直接进行CAS操作`base`，这是在没有并发的情况下。当并发数开始增长，有一个线程对`base`的CAS失败了，就会调用父类方法`longAccumulate（x, null, true, index)`，此时就会创建`Cell`数组，并实例化当前线程进入的那一个`Cell`对象，让线程CAS Cell对象中的`value`值，并在此之后都不再修改`base`，线程直接进入到算法分配到的`Cell`对象中修改其`value`值。sum公式如下：
+$$
+value=base+ 
+i=0
+∑
+n
+​
+ Cell[i]
+$$
+`longAccumulate`是`Striped64`中最重要的方法，其中包含分配Cell数组，懒汉式的实例Cell对象，扩容数组。Cell数组的大小以`n << 1`扩容，直到超过CPU核心数大小。在数组初始化和Cell对象初始化过程中，巧妙的利用了[CAS无限自旋一个标志位确保初始化完成](#CAS自旋标志位确保完成任务)，这个知道就好，不推荐在实际业务中使用。
+
+OK了，讲完代码方面的原理，我们再来谈谈硬件层面中有一个值得我们了解的小知识。前面讲过CPU的**三级缓存和缓存锁**，为了提高IO效率，CPU在加载内存到缓存中时并不是只加载那一个数据，而是**把周围的64/128个字节的数据都加载到缓存中**，这一次加载的64/128个字节就是**缓存行**。CAS通过LOCK信号来进行独占缓存行，解锁后会使其它CPU中的响应缓存行失效。在Cell数组中，元素是物理有序排列的，当CPU读取一个Cell元素[0]并需要进行CAS操作前，会把旁边的元素[1]也读到同一行缓存行中，那么如果旁边的元素[1]也在CAS呢？就会使我当前CPU的这个缓存行失效，迫使CPU重新缓存数据，实际上，CPU都不是修改元素[1]的值，就因为缓存锁和数据一致性却导致要修改的元素[0]的值也失效了。解决这个问题的突破点就是不让Cell元素在一个缓存行中同时出现，我们可以在Cell对象中加入一些无用的字节**填充缓存行**，比如定义8个long（64个字节，假设缓存行64字节，那么同一个Cell元素就有大概率不出现在同一个缓存行）。Java 8引入了*sun.misc.Contended*注解（Java 9将其重新打包在*jdk.internal.vm.annotation*包下），以防止虚假共享，默认会使对象或字段填充128个字节。源码的Cell类上就有这个注解。
+
+```java
+@jdk.internal.vm.annotation.Contended static final class Cell {}
+```
+
+#### 相似类
+
+除了`LongAdder`，还有以下类有相似的功能，`*Accumulator`可以指定计算公式，指定初始值。实际上`*Adder`是`*Accumulator`的一个特例，只是为了简化使用做了类似初始值默认为0这样的封装。
+
+<img src="image-20240924153650086.png" alt="image-20240924153650086" style="zoom: 33%;" />
+
+## final关键字
+
+==关键词：有序性、完全初始化、不可变引用==
+
+### final介绍
+
+`final`不可变变量，可以用在类、方法、变量上，使用在不同域中有不同的效果。
+
+- 不可变类：不可继承。
+- 不可变方法：不可重写。
+- 不可变字段：不可重新赋值，分为编译期赋值（声明时赋值）和运行时赋值（构造函数中赋值）。
+
+`final`可以修饰基本类型和引用类型，修饰基本类型时不可修改变量的值，修饰引用类型时不可修改变量引用的对象，但是可以修改被引用对象中的内容。
+
+`final`可以确保引用对象的可见性：一是final确保引用对象在构造函数完成前完成初始化；二是final不可变，不存在因为数据一致性问题，导致引用被修改，**但是不保证引用对象的内容的可见性**。
+
+简单提一下`final`基础，主要放在final的原理和在多线程下的影响。
+
+### 多线程下的final
+
+对象创建过程大致分为两个：
+
+1. 分配内存：为当前初始化对象分配内存，并为字段设置默认值
+2. 执行构造函数：为字段设置值
+
+我们希望对象完成了以上两步，即对象初始化之后，对象的引用才被赋值到变量中，此时才能通过`x = object.xx`的方式访问对象中的内容，但是因为指令重排，对象的引用可能不在对象完成初始化之后就赋值给了变量，此时对象就是部分初始化状态。下图中所示是正常的初始化过程。
+
+<img src="image-20240925164441826.png" alt="image-20240925164441826" style="zoom:50%;" />
+
+在引用对象未完成初始化，那么此时如果有其它线程访问对象中的变量，那么就可能会读取到错误的默认值。使用final修饰的字段，就不会出现这种情况，保证该字段在被访问之前final变量被完全初始化，得益于final的**有序性**。
+
+**final域排序规则：**
+
+- **写规则**：禁止对final域的写与构造函数外的操作重排序。
+- **读规则**：禁止初次读对象与读final域的重排序。
+
+再来深入分析一下这两条规则。
+
+写规则要求编译器在final域写之后，构造函数返回之前插入一个StoreStore屏障，**确保引用地址赋值不会跑到final写入之前**。读规则要求编译器在初始读final域之前插入LoadLoad屏障，所以要成功完成了对象的读，才能读final域。这两个规则都是保证了final域在对象发布引用之前必须可见。
+
+针对final修饰引用数据类型，final域写**增加**了这样的规则：在构造函数内对一个final修饰的对象的成员域的写入，与地址引用赋值不能重排序。final引用对象在所属对象的地址发布之前必须被正确构造。
+
+总的来说，（不使用锁的情况下）final保证了在多线程中，属性的可见性和正确初始化，防止出现访问的变量未被初始化（0或者null），导致任务出错。
 
 # 扩展
 
@@ -1184,7 +1427,7 @@ volatile变量不能保证原子性就是因为读和写分别是原子的，但
 
 `notify()`和`notifyAll()`都不能对针对某一个线程进行唤醒，但是可以在代码角度进行设计，避免**虚假唤醒**。比如线程唤醒的条件变量，在线程中使用`while`循环来判断变量的值，假设当使用`notify`时，唤醒的线程没有达到条件，则再次进入`wait`循环中等待一下次唤醒。
 
-# 代码块
+# 案例
 
 ## 设计模式——两阶段中止（TwoPhaseTermination）
 
@@ -1407,3 +1650,42 @@ public class VolatileNonAtomicTest {
 ```
 
 [return](#volatile原理)
+
+## CAS自旋标志位确保完成任务
+
+```java
+public class CASDemo {
+    AtomicInteger mark = new AtomicInteger();
+    public static void main(String[] args) {
+        CASDemo casDemo = new CASDemo();
+        new Thread(() -> {
+            casDemo.park();
+            // 模拟任务
+            try {
+                System.out.println("开始任务");
+                sleep(1000);
+                System.out.println("任务结束");
+            } catch (InterruptedException e) {
+                throw new RuntimeException(e);
+            }
+            casDemo.unpark();
+        }).start();
+        new Thread(() -> {
+            System.out.println("等待cas");
+            casDemo.park();
+            System.out.println("cas成功");
+            casDemo.unpark();
+        }).start();
+    }
+    public void park() {
+        for (;;) {
+            if (mark.compareAndSet(0, 1)) break;
+        }
+    }
+    public void unpark() {
+        mark.compareAndSet(1, 0);
+    }
+}
+```
+
+[return](#相似类)

@@ -1,5 +1,7 @@
 package org.example.t7;
 
+import java.util.concurrent.atomic.AtomicInteger;
+
 import static java.lang.Thread.sleep;
 
 public class VolatileSeeTest {
@@ -7,6 +9,7 @@ public class VolatileSeeTest {
 
     //    static volatile boolean flag = true; // volatile可以保证flag被修改后，下一次从内存中刷新最新值到缓存中（可见性）
     public static void main(String[] args) {
+
         new Thread(() -> {
             System.out.println("start......");
             while (flag) {

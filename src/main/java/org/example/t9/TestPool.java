@@ -6,6 +6,7 @@ import java.util.ArrayDeque;
 import java.util.Deque;
 import java.util.HashSet;
 import java.util.concurrent.BlockingDeque;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.LockSupport;
@@ -22,14 +23,30 @@ import java.util.concurrent.locks.ReentrantLock;
 @Slf4j(topic = "c.main")
 public class TestPool {
     public static void main(String[] args) {
-        MyThreadPool myThreadPool = new MyThreadPool(2, 10, TimeUnit.SECONDS, 10);
+        MyThreadPool myThreadPool = new MyThreadPool(2, 10, TimeUnit.SECONDS, 10,
+                (queue, task) -> {
+//                    queue.putTask(task); // 1. 原来的阻塞添加
+                    System.out.println("满了就不添加，直接放弃该任务"); // 2. 放弃任务
+                });
         for (int i = 0; i < 15; i++) {
             int finalI = i;
-            Runnable task = () -> log.debug(Thread.currentThread().getName() + "完成任务" + finalI);
+            Runnable task = () -> {
+                try {
+                    Thread.sleep(50000);
+                } catch (InterruptedException e) {
+                    throw new RuntimeException(e);
+                }
+                log.debug(Thread.currentThread().getName() + "完成任务" + finalI);
+            };
             myThreadPool.execute(task);
-            log.debug("成功提交任务：" + i + "内存编号：" + task);
+            log.debug("提交任务：" + i + "内存编号：" + task);
         }
     }
+}
+
+@FunctionalInterface
+interface RejectPolicy<T> {
+    void reject(TaskQueue<T> queue, T task);
 }
 
 /**
@@ -40,15 +57,17 @@ class MyThreadPool {
     private int coreSize; // 线程池大小
     private long timeout; // 线程无任务时超时时间，超过这个时间没有任务，销毁线程
     private TimeUnit timeUnit;
+    private RejectPolicy rejectPolicy; // 插入任务的自定义策略
 
     private TaskQueue<Runnable> taskQueue;
     private HashSet<MyThread> workers = new HashSet<>();
     ;
 
-    public MyThreadPool(int coreSize, long timeout, TimeUnit timeUnit, int taskSize) {
+    public MyThreadPool(int coreSize, long timeout, TimeUnit timeUnit, int taskSize, RejectPolicy rejectPolicy) {
         this.coreSize = coreSize;
         this.timeout = timeout;
         this.timeUnit = timeUnit;
+        this.rejectPolicy = rejectPolicy;
         this.taskQueue = new TaskQueue<>(taskSize);
     }
 
@@ -59,7 +78,8 @@ class MyThreadPool {
             myThread.start();
             log.debug("新建核心线程执行任务{}", task);
         } else {
-            taskQueue.putTask(task);
+//            taskQueue.putTask(task);
+            taskQueue.tryPut(this.rejectPolicy, task);
             log.debug("核心线程数上限，{}进入任务队列", task);
         }
     }
@@ -124,6 +144,26 @@ class TaskQueue<T> {
             taskQueue.addLast(task);
             emptyWaitSet.signal(); // 有任务可以执行
         } catch (InterruptedException e) {
+            throw new RuntimeException(e);
+        } finally {
+            lock.unlock();
+        }
+        return true;
+    }
+
+    /**
+     * 自定义队列满后的插入条件
+     */
+    public boolean tryPut(RejectPolicy rejectPolicy, T task) {
+        lock.lock();
+        try {
+            if (taskQueue.size() == queueSize) { // 队列满时自定义策略
+                rejectPolicy.reject(this, task);
+            } else { // 队列不满时直接加入队列
+                taskQueue.addLast(task);
+                emptyWaitSet.signal(); // 有任务可以执行
+            }
+        } catch (Exception e) {
             throw new RuntimeException(e);
         } finally {
             lock.unlock();

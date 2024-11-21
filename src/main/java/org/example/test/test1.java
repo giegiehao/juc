@@ -1,5 +1,7 @@
 package org.example.test;
 
+import java.util.UUID;
+
 public class test1 {
 
     public static void main(String[] args) {
@@ -10,5 +12,6 @@ public class test1 {
         System.out.println(~3);
         System.out.println(~3 & 3);
         System.out.println(3 & 2);
+        System.out.println(UUID.randomUUID());
     }
 }
